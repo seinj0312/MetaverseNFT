@@ -88,20 +88,7 @@ interface NFTInterface {
     function addPropertyWithContent(uint256 _tokenId, string calldata _content) external;
 }
 
-interface ERC20Interface {
-    /**
-     * @dev Emitted when `value` tokens are moved from one account (`from`) to
-     * another (`to`).
-     *
-     * Note that `value` may be zero.
-     */
-    event Transfer(address indexed from, address indexed to, uint256 value);
-
-    /**
-     * @dev Returns the amount of tokens owned by `account`.
-     */
-    function balanceOf(address account) external view returns (uint256);
-
+interface TokenInterface {
     /**
      * @dev Moves `amount` tokens from `from` to `to` using the
      * allowance mechanism. `amount` is then deducted from the caller's
@@ -118,17 +105,23 @@ interface ERC20Interface {
     ) external returns (bool);
 }
 
-contract NFTMulticlassLinearAuction is ActivatedByOwner {
+interface PriceFeed {
+    function getPrice(address token) external view returns(uint256 price);
+}
+
+contract NFTMultiCurrencySaleSystem is ActivatedByOwner {
 
     event AuctionCreated(uint256 indexed tokenClassAuctionID, uint256 timestamp);
     event TokenSold(uint256 indexed tokenID, uint256 indexed tokenClassID, address indexed buyer);
     event NFTContractSet(address indexed newNFTContract, address indexed oldNFTContract);
+    event TokenContractAdded(string indexed symbol, address indexed newTokenContract);
     event RevenueWithdrawal(uint256 amount);
     
 
     address public nft_contract;
-    address public erc20_contract = 0xbf6c50889d3a620eb42C0F188b65aDe90De958c4; //BUSDT Address
+    address public price_feed_contract = 0x9bFc3046ea26f8B09D3E85bd22AEc96C80D957e3;
     address public revenue = 0x01000B5fE61411C466b70631d7fF070187179Bbf; // This address has the rights to withdraw funds from the contact.
+    mapping (string => address) public tokensList; //ERC20 or ERC223 available token list.
 
     struct NFTAuctionClass
     {
@@ -169,6 +162,9 @@ contract NFTMulticlassLinearAuction is ActivatedByOwner {
         revenue = _revenue_address;
     }
 
+    function setPriceFeedAddress(address payable _price_feed_contract) public  onlyOwner {
+        price_feed_contract = _price_feed_contract;
+    }
 
     function setNFTContract(address _nftContract) public onlyOwner
     {
@@ -177,26 +173,28 @@ contract NFTMulticlassLinearAuction is ActivatedByOwner {
         nft_contract = _nftContract;
     }
 
-    function setERC20Contract(address _erc20_contract) public onlyOwner
+    function AddTokenContract(string memory _symbol, address _token_contract) public onlyOwner
     {
-        emit NFTContractSet(_erc20_contract, erc20_contract);
+        emit TokenContractAdded(_symbol, _token_contract);
 
-        erc20_contract = _erc20_contract;
+        tokensList[_symbol] = _token_contract;
     }
 
-    function buyNFT(uint256 _classID, uint256 _erc20_amount) public payable onlyActive
+    function buyNFTwithToken(uint256 _classID, string memory _token_symbol,uint256 _currency_amount) public onlyActive
     {
         // WARNING!
         // This function does not refund overpaid amount at the moment.
         // TODO
 
-        require(_erc20_amount >= auctions[_classID].priceInWei, "Insufficient funds");
-        require(auctions[_classID].amount_sold < auctions[_classID].max_supply, "This auction has already sold all allocated NFTs");
-        require(block.timestamp < auctions[_classID].start_timestamp + auctions[_classID].duration, "This auction already expired");
-        require(block.timestamp > auctions[_classID].start_timestamp, "This auction is not yet started");
+        uint256 toUSD = _currency_amount * PriceFeed(price_feed_contract).getPrice(tokensList[_token_symbol]);
+
+        require(toUSD >= auctions[_classID].priceInWei, "Insufficient funds");
+        require(auctions[_classID].amount_sold < auctions[_classID].max_supply, "This sale has already sold all allocated NFTs");
+        require(block.timestamp < auctions[_classID].start_timestamp + auctions[_classID].duration, "This sale already expired");
+        require(block.timestamp > auctions[_classID].start_timestamp, "This sale is not yet started");
         require(auctions[_classID].priceInWei != 0, "Min price is not configured by the owner");
 
-        ERC20Interface(erc20_contract).transferFrom(msg.sender, revenue, _erc20_amount);
+        TokenInterface(tokensList[_token_symbol]).transferFrom(msg.sender, revenue, _currency_amount);
 
         uint256 _mintedId = NFTInterface(nft_contract).mintWithClass(_classID);
         auctions[_classID].amount_sold++;
@@ -204,5 +202,36 @@ contract NFTMulticlassLinearAuction is ActivatedByOwner {
         NFTInterface(nft_contract).transfer(msg.sender, _mintedId, "");
 
         emit TokenSold(_mintedId, _classID, msg.sender);
+    }
+
+    function buyNFTwithCoin(uint256 _classID, string memory _token_symbol,uint256 _currency_amount) public payable onlyActive
+    {
+        // WARNING!
+        // This function does not refund overpaid amount at the moment.
+        // TODO
+
+        require(_currency_amount*10e18 == msg.value, "_currency_amount and msg.value do not match");
+
+        uint256 toUSD = _currency_amount * PriceFeed(price_feed_contract).getPrice(tokensList[_token_symbol]);
+
+        require(toUSD >= auctions[_classID].priceInWei, "Insufficient funds");
+        require(auctions[_classID].amount_sold < auctions[_classID].max_supply, "This sale has already sold all allocated NFTs");
+        require(block.timestamp < auctions[_classID].start_timestamp + auctions[_classID].duration, "This sale already expired");
+        require(block.timestamp > auctions[_classID].start_timestamp, "This sale is not yet started");
+        require(auctions[_classID].priceInWei != 0, "Min price is not configured by the owner");
+
+        uint256 _mintedId = NFTInterface(nft_contract).mintWithClass(_classID);
+        auctions[_classID].amount_sold++;
+
+        NFTInterface(nft_contract).transfer(msg.sender, _mintedId, "");
+
+        emit TokenSold(_mintedId, _classID, msg.sender);
+    }
+
+    function withdrawRevenue() public onlyOwner
+    {
+        emit RevenueWithdrawal(address(this).balance);
+
+        payable(revenue).transfer(address(this).balance);
     }
 }
